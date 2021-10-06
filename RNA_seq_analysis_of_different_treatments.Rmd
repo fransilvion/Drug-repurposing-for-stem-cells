@@ -1,0 +1,657 @@
+---
+title: "RNA-seq analysis of different treatments"
+author: "Gherman Novakovsky"
+date: "06/10/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r}
+library(tximportData)
+library(tximport)
+library(tximeta)
+library(GenomicFeatures)
+library(RColorBrewer)
+library(limma)
+library(edgeR)
+library(fgsea)
+library(dplyr)
+library(tibble)
+library(data.table)
+library(msigdbr)
+```
+
+Loading the gencode transcriptome (release 36, GRCh38.p12) (in bash):
+```{bash}
+wget ftp://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_36/gencode.v36.pc_transcripts.fa.gz
+```
+
+Before running salmon go to the appropriate environment:
+```{bash}
+conda activate salmon
+```
+
+Indexing it:
+```{bash}
+salmon index -t gencode.v36.pc_transcripts.fa.gz -i human38_index_pc
+```
+
+Quantifying the samples:
+```{bash}
+#!/bin/bash
+
+folders=(hours_24 hours_24_BwoC hours_6 hours_72 hours_72_new)
+folders=(hours_6_BwoC) #testing
+
+for dir in "${folders[@]}"
+do
+        samples=($(ls $dir/SOX17-40040))
+
+        for samp in "${samples[@]}"
+        do
+                FILES=$(ls $dir/SOX17-40040/"$samp"//*R1* | tr '\n' ' ')
+                echo "Processing sample $samp"
+                salmon quant -i human38_index_pc -l A \
+                        -r $FILES \
+                        -p 4 --validateMappings -o $dir/quants/"$samp"_quant
+                echo "Done with sample $samp"
+        done
+
+        echo "DONE WITH $dir"
+done
+```
+
+# Analysis
+
+Constructing metadata:
+```{r}
+#metadata construction
+samples <- c("AC1-33037", "AC2-33038",
+             "AC1-38042", "AC2-38043",
+             "A1", "A2",
+             "C1-33035", "C2-33036",
+             "C1-38040", "C2-38041",
+             "BC1-33041", "BC2-33042",
+             "BC1-38046", "BC2-38047",
+             "B1", "B2",
+             "JC1-33039", "JC2-33040",
+             "JC1-38044", "JC2-38045",
+             "J1", "J2",
+             "BLoA1_72", "BLoA2_72",
+             "BwoC1_6", "BwoC2_6",
+             "BwoC1_24", "BwoC2_24",
+             "N1-33033", "N2-33034")
+
+
+quant <- c("AC1-33037_quant", "AC2-33038_quant",
+             "AC1-38042_quant", "AC2-38043_quant",
+             "A1_quant", "A2_quant",
+             "C1-33035_quant", "C2-33036_quant",
+             "C1-38040_quant", "C2-38041_quant",
+             "BC1-33041_quant", "BC2-33042_quant",
+             "BC1-38046_quant", "BC2-38047_quant",
+             "B1_quant", "B2_quant",
+             "JC1-33039_quant", "JC2-33040_quant",
+             "JC1-38044_quant", "JC2-38045_quant",
+             "J1_quant", "J2_quant",
+             "BLoA1_72_quant", "BLoA2_72_quant",
+             "BwoC1_6_quant", "BwoC2_6_quant",
+             "BwoC1_24_quant", "BwoC2_24_quant",
+             "N1-33033_quant", "N2-33034_quant")
+
+
+treatment <- c("AC_6", "AC_6", "AC_24", "AC_24", "AC_72", "AC_72",
+               "CHIR_6", "CHIR_6", "CHIR_24", "CHIR_24",
+               "BRD_CHIR_6", "BRD_CHIR_6", "BRD_CHIR_24", "BRD_CHIR_24",
+               "BRD_CHIR_72", "BRD_CHIR_72",
+               "JNJ_CHIR_6", "JNJ_CHIR_6", "JNJ_CHIR_24", "JNJ_CHIR_24",
+               "JNJ_CHIR_72", "JNJ_CHIR_72",
+               "BRD_CHIR_LOW_AC_72", "BRD_CHIR_LOW_AC_72",
+               "BRD_NO_CHIR_6", "BRD_NO_CHIR_6", "BRD_NO_CHIR_24", "BRD_NO_CHIR_24",
+               "ESC", "ESC")
+
+#1 is affected, 0 if not
+metadata <-data.frame(Samples = samples, Quant = quant, Treatment = treatment)
+rownames(metadata) <- samples
+```
+
+```{r}
+#Loading the data
+
+files <- c(
+           "/home/german/Shugo_RNA_seq_bulk_NEW/hours_6/quants_pc/AC1-33037_quant/quant.sf",
+           "/home/german/Shugo_RNA_seq_bulk_NEW/hours_6/quants_pc/AC2-33038_quant/quant.sf",
+           "/home/german/Shugo_RNA_seq_bulk_NEW/hours_24/quants_pc/AC1-38042_quant/quant.sf",
+           "/home/german/Shugo_RNA_seq_bulk_NEW/hours_24/quants_pc/AC2-38043_quant/quant.sf",
+           "/home/german/Shugo_RNA_seq_bulk_NEW/hours_72/quants_pc/A1_quant/quant.sf",
+           "/home/german/Shugo_RNA_seq_bulk_NEW/hours_72/quants_pc/A2_quant/quant.sf",
+           "/home/german/Shugo_RNA_seq_bulk_NEW/hours_6/quants_pc/C1-33035_quant/quant.sf",
+           "/home/german/Shugo_RNA_seq_bulk_NEW/hours_6/quants_pc/C2-33036_quant/quant.sf",
+           "/home/german/Shugo_RNA_seq_bulk_NEW/hours_24/quants_pc/C1-38040_quant/quant.sf",
+           "/home/german/Shugo_RNA_seq_bulk_NEW/hours_24/quants_pc/C2-38041_quant/quant.sf",
+           "/home/german/Shugo_RNA_seq_bulk_NEW/hours_6/quants_pc/BC1-33041_quant/quant.sf",
+           "/home/german/Shugo_RNA_seq_bulk_NEW/hours_6/quants_pc/BC2-33042_quant/quant.sf",
+           "/home/german/Shugo_RNA_seq_bulk_NEW/hours_24/quants_pc/BC1-38046_quant/quant.sf",
+           "/home/german/Shugo_RNA_seq_bulk_NEW/hours_24/quants_pc/BC2-38047_quant/quant.sf",
+           "/home/german/Shugo_RNA_seq_bulk_NEW/hours_72/quants_pc/B1_quant/quant.sf",
+           "/home/german/Shugo_RNA_seq_bulk_NEW/hours_72/quants_pc/B2_quant/quant.sf",
+           "/home/german/Shugo_RNA_seq_bulk_NEW/hours_6/quants_pc/JC1-33039_quant/quant.sf",
+           "/home/german/Shugo_RNA_seq_bulk_NEW/hours_6/quants_pc/JC2-33040_quant/quant.sf",
+           "/home/german/Shugo_RNA_seq_bulk_NEW/hours_24/quants_pc/JC1-38044_quant/quant.sf",
+           "/home/german/Shugo_RNA_seq_bulk_NEW/hours_24/quants_pc/JC2-38045_quant/quant.sf",
+           "/home/german/Shugo_RNA_seq_bulk_NEW/hours_72/quants_pc/J1_quant/quant.sf",
+           "/home/german/Shugo_RNA_seq_bulk_NEW/hours_72/quants_pc/J2_quant/quant.sf",
+           "/home/german/Shugo_RNA_seq_bulk_NEW/hours_72/quants_pc/BLoA1_72_quant/quant.sf",
+           "/home/german/Shugo_RNA_seq_bulk_NEW/hours_72/quants_pc/BLoA2_72_quant/quant.sf",
+           "/home/german/Shugo_RNA_seq_bulk_NEW/hours_6_BwoC/quants_pc/BwoC1_6_quant/quant.sf",
+           "/home/german/Shugo_RNA_seq_bulk_NEW/hours_6_BwoC/quants_pc/BwoC2_6_quant/quant.sf",
+           "/home/german/Shugo_RNA_seq_bulk_NEW/hours_24_BwoC/quants_pc/BwoC1_24_quant/quant.sf",
+           "/home/german/Shugo_RNA_seq_bulk_NEW/hours_24_BwoC/quants_pc/BwoC2_24_quant/quant.sf",
+           "/home/german/Shugo_RNA_seq_bulk_NEW/hours_6/quants_pc/N1-33033_quant/quant.sf",
+           "/home/german/Shugo_RNA_seq_bulk_NEW/hours_6/quants_pc/N2-33034_quant/quant.sf")
+
+names(files) <- metadata$Samples
+
+TxDb <- makeTxDbFromGFF(file="gencode.v36.annotation.gff3.gz")
+
+k <- keys(TxDb, keytype = "TXNAME")
+tx2gene <- AnnotationDbi::select(TxDb, k, "GENEID", "TXNAME")
+
+txi <- tximport(files, type = "salmon", tx2gene = tx2gene, ignoreAfterBar = TRUE)
+y <- DGEList(txi$counts)
+# 
+group <- metadata$Treatment
+y$samples$group <- as.factor(group) #58434    10
+
+#keep.exprs <- filterByExpr(y, group=group, min.count = 30, min.total.count = 60)
+keep.exprs <- filterByExpr(y, group=group)
+y <- y[keep.exprs,, keep.lib.sizes=FALSE]
+
+#Normalizing for the library size
+y <- calcNormFactors(y, method = "TMM")
+```
+
+Making a gene reference file
+```{r}
+test <- rtracklayer::import("gencode.v36.annotation.gff3.gz")
+test2 <- test@elementMetadata@listData
+df = data.frame(geneID = test2[["gene_id"]], geneName = test2[["gene_name"]], geneType = test2[["gene_type"]])
+#df <- df[!duplicated(df),]
+df <- df %>% filter(geneID %in% rownames(y))
+test <- setDT(df, key = 'geneID')[J(rownames(y))]
+```
+
+```{r}
+#takes 18 mins
+start.time <- Sys.time()
+
+genex <- sapply(rownames(y), function(x){ as.character(unlist(unique(test %>% filter(geneID == x) %>% dplyr::select("geneName")))) })
+
+end.time <- Sys.time()
+time.taken <- end.time - start.time
+time.taken
+```
+```{r}
+f <- genex[which(names(genex) %in% rownames(y))] #to make sure that we don't mess it up
+k = 0
+delgenes <- genex[duplicated(genex)]
+for (i in 1:length(f)){
+  if (f[i] %in% delgenes){
+    f[i] <- paste(f[i], as.character(k), sep="_")
+    k = k + 1
+  }
+}
+
+test_match_order <- function(x,y) {
+
+  if (all(x==y)) print('Perfect match in same order')
+
+  if (!all(x==y) && all(sort(x)==sort(y))) print('Perfect match in wrong order')
+
+  if (!all(x==y) && !all(sort(x)==sort(y))) print('No match')
+}
+
+test_match_order(names(f),rownames(y))
+```
+```{r}
+length(unique(f))
+```
+```{r}
+rownames(y) <- f
+```
+
+```{r}
+saveRDS(y,"all_time_points.rds")
+```
+
+```{r}
+y <- readRDS("all_time_points.rds")
+```
+
+
+```{r}
+#Data visualization
+
+lcpm <- cpm(y, log=TRUE)
+col.group <- y$samples$group
+#levels(col.group) <-  brewer.pal(nlevels(col.group), "Set1")
+mycolors <- c(brewer.pal(name="Dark2", n = 8), brewer.pal(name="Set3", n = 7))
+levels(col.group) <- mycolors
+
+col.group <- as.character(col.group)
+col.group[9] <- "#008080"
+col.group[10] <- "#008080"
+plotMDS(lcpm, cex=1.25, labels = group, col = col.group, dim.plot = c(1,2)) #first and second dimension
+```
+
+```{r}
+sh <- lcpm[,c("AC1-33037", "AC2-33038", "C1-33035", "C2-33036", "BC1-33041", "BC2-33042",
+              "JC1-33039", "JC2-33040", "N1-33033", "N2-33034")]
+
+project.pca <- prcomp(t(lcpm), center = TRUE,scale. = TRUE)
+project.pca.proportionvariances <- ((project.pca$sdev^2) / (sum(project.pca$sdev^2)))*100
+
+col <- brewer.pal(10, "Paired")
+
+plot(project.pca$x, type="n", main="Principal components analysis bi-plot", xlab=paste("PC1, ", round(project.pca.proportionvariances[1], 2), "%"), ylab=paste("PC2, ", round(project.pca.proportionvariances[2], 2), "%"))
+points(project.pca$x, col=col, pch=16, cex=1)
+text(project.pca$x, col="black", labels = group, pch=16, cex=1.25, pos = 3)
+```
+
+```{r}
+#Visualization of gene markers (Figure 7)
+
+library("heatmaply")
+library(khroma)
+
+designMatrix <- model.matrix(~0 + Treatment, metadata) #differences are not that big to correct for
+colnames(designMatrix) <- gsub("Treatment", "", colnames(designMatrix))
+
+v <- voom(y, designMatrix, plot=FALSE)
+cleaned_log_cpm_df <- as.data.frame(v$E)
+
+lcpm <- readRDS("lcpm_all_time_points.rds")
+
+#TEST WITH BATCHES
+batch <- factor(c(rep(1, 2), rep(2, 2),
+          rep(3, 2), rep(1, 2),
+          rep(2, 2), rep(1, 2),
+          rep(2, 2), rep(3, 2),
+          rep(1, 2), rep(2, 2),
+          rep(3, 2), rep(3, 2),
+          rep(4, 2), rep(5, 2),
+          rep(1, 2)))
+
+genes <- c("SOX2", "POU5F1", "NANOG", "MYCN", "CDX1", "FGF4", "TBXT", "MSX1", "EOMES",
+           "GATA6", "SOX17","CXCR4")
+
+genes <- c("BMP1", "BMP2", "BMP3", "BMP4", "BMP5", "BMP6", "BMP7", "SOX2", "POU5F1", "NANOG", "MYCN", "CDX1",
+           "FGF4", "TBXT", "MSX1", "EOMES","GATA6", "SOX17","CXCR4")
+
+genes <- c("BMP1", "BMP2", "BMP3", "BMP4", "SOX2", "POU5F1", "NANOG", "MYCN", "CDX1",
+           "FGF4", "TBXT", "MSX1", "EOMES","GATA6", "SOX17","CXCR4")
+
+
+for_heatmap <- lcpm[genes, ]
+for_heatmap <- t(for_heatmap)
+for_heatmap <- t(scale(t(for_heatmap)))
+
+cols <- c(rep("#000000", 2), rep("#808080", 2),
+          rep("#C0C0C0", 2), rep("#FFFFFF", 2),
+          rep("#800000", 2), rep("#FF0000", 2),
+          rep("#808000", 2), rep("#FFFF00", 2),
+          rep("#008000", 2), rep("#00FF00", 2),
+          rep("#008080", 2), rep("#00FFFF", 2),
+          rep("#000080", 2), rep("#0000FF", 2),
+          rep("#800080", 2))
+
+names(cols) <- c(rep("Ac6", 2), rep("Ac24", 2), rep("Ac72", 2), 
+                 rep("C6", 2), rep("C24", 2), rep("BC6", 2), rep("BC24", 2),
+                 rep("BC72", 2), rep("JC6", 2), rep("JC24", 2), rep("JC72", 2),
+                 rep("BA72", 2), rep("B6", 2), rep("B24", 2), rep("N6", 2))
+
+BuRd <- colour("BuRd")
+iridescent <- colour("iridescent")
+YlOrBr <- colour("YlOrBr")
+s <- ggheatmap(
+               for_heatmap,
+               main="Expression of the marker genes",
+               col=colorRampPalette(YlOrBr(10))(256),
+               showticklabels = c(F, T),
+               dendrogram = "none",
+               fontsize_row = 5,
+               RowSideColors = cols
+               #ColSideColors = cols
+)
+
+ggsave(file="fig7_genes_heatmap_YlOrBr.svg", plot=s)#, width=10, height=8)
+```
+
+```{r}
+#Visualization of pathways (Figure 7)
+library(GSVA)
+library("heatmaply")
+
+m_df_h <-  msigdbr(species = "Homo sapiens", category = "H")
+m_df_c2 <-  msigdbr(species = "Homo sapiens", category = "C2")
+m_df_c3 <-  msigdbr(species = "Homo sapiens", category = "C3")
+m_df_c5 <-  msigdbr(species = "Homo sapiens", category = "C5", subcategory = "BP")
+
+fgsea_sets_h <- m_df_h %>% split(x = .$gene_symbol, f = .$gs_name)
+fgsea_sets_c2 <- m_df_c2 %>% split(x = .$gene_symbol, f = .$gs_name)
+fgsea_sets_c3 <- m_df_c3 %>% split(x = .$gene_symbol, f = .$gs_name)
+fgsea_sets_c5 <- m_df_c5 %>% split(x = .$gene_symbol, f = .$gs_name)
+termTF <- gmtPathways("RegNetworkStrong.gmt")
+
+lcpm <- readRDS("lcpm_all_time_points.rds")
+
+gsva_out_ac <- gsva(lcpm, fgsea_sets_h, min.sz=5, max.sz=500,
+                 mx.diff=TRUE, verbose=FALSE, parallel.sz=1)
+gvsa_df_ac <- as.data.frame(gsva_out_ac)
+pathways_to_analyze <- c("HALLMARK_DNA_REPAIR", "HALLMARK_OXIDATIVE_PHOSPHORYLATION", #stem
+                         "HALLMARK_MYC_TARGETS_V1", "HALLMARK_MYC_TARGETS_V2", #middle
+                         "HALLMARK_MTORC1_SIGNALING", #middle
+                         "HALLMARK_TGF_BETA_SIGNALING", "HALLMARK_WNT_BETA_CATENIN_SIGNALING", #top
+                         "HALLMARK_HYPOXIA", #top
+                         "HALLMARK_APOPTOSIS", "HALLMARK_P53_PATHWAY", #top 
+                         "HALLMARK_PROTEIN_SECRETION", "HALLMARK_IL2_STAT5_SIGNALING", #top
+                         "HALLMARK_TNFA_SIGNALING_VIA_NFKB") #top
+gvsa_df_ac <- gvsa_df_ac[pathways_to_analyze,]
+
+for_heatmap <- t(gvsa_df_ac)
+for_heatmap <- t(scale(t(for_heatmap)))
+
+cols <- c(rep("#000000", 2), rep("#808080", 2),
+          rep("#C0C0C0", 2), rep("#FFFFFF", 2),
+          rep("#800000", 2), rep("#FF0000", 2),
+          rep("#808000", 2), rep("#FFFF00", 2),
+          rep("#008000", 2), rep("#00FF00", 2),
+          rep("#008080", 2), rep("#00FFFF", 2),
+          rep("#000080", 2), rep("#0000FF", 2),
+          rep("#800080", 2))
+
+names(cols) <- c(rep("Ac6", 2), rep("Ac24", 2), rep("Ac72", 2), 
+                 rep("C6", 2), rep("C24", 2), rep("BC6", 2), rep("BC24", 2),
+                 rep("BC72", 2), rep("JC6", 2), rep("JC24", 2), rep("JC72", 2),
+                 rep("BA72", 2), rep("B6", 2), rep("B24", 2), rep("N6", 2))
+
+BuRd <- colour("BuRd")
+YlOrBr <- colour("YlOrBr")
+iridescent <- colour("iridescent")
+s <- ggheatmap(
+               for_heatmap,
+               main="Expression of the marker genes",
+               col=colorRampPalette(YlOrBr(10))(256),
+               showticklabels = c(F, T),
+               dendrogram = "none",
+               fontsize_row = 5,
+               RowSideColors = cols
+               #ColSideColors = cols
+)
+
+ggsave(file="fig7_pathways_heatmap_YlOrBr.svg", plot=s)
+```
+
+For DE analysis:
+
+```{r}
+#Help functions
+###############
+
+#function for DGE for specified question (groups)
+limma_DGE_group_analysis <- function(expr_mat, meta_data, group1, group2){
+  #Introducing the corresponding column to meta data 
+  md <- meta_data
+  
+  #you should run the fit and eBayes step on all of the data
+  #that's why commented
+  #md <- md %>% filter(Treatment %in% c(group1, group2))
+  #md$Analysis <- integer(nrow(md))
+  #md$Analysis[which(md$Treatment %in% group1)] <- 1
+  #md$Analysis[which(md$Treatment %in% group2)] <- 2
+  #md$Analysis <- as.factor(md$Analysis)  
+  
+  #intercept (0) so easier to look at differences between groups
+  designMatrix <- model.matrix(~0 + Treatment, md) #differences are not that big to correct for
+  colnames(designMatrix) <- gsub("Treatment", "", colnames(designMatrix))
+  #contrast matrix to specify what type of differences we are looking for 
+  #contrastMatrix <- makeContrasts(
+  #  A1 = Analysis1 - Analysis2,
+  #  levels = colnames(designMatrix))
+  contrastMatrix <- makeContrasts(contrasts=paste(group1,"-",group2, sep=""),
+                                  levels=colnames(designMatrix))
+  
+  #subsetting the corresponding samples
+  #you should run the fit and eBayes step on all of the data
+  #expr_mat <- expr_mat[,md$Samples]
+  
+  #voom -  estimates the mean-variance relationship and uses this to compute appropriate observation-level weights
+  v <- voom(expr_mat, designMatrix, plot=FALSE)
+  #Fit linear model for each gene
+  vfit <- lmFit(v, designMatrix)
+  #fit the contrast using the original fitted model
+  vfit <- contrasts.fit(vfit, contrasts=contrastMatrix)
+  #apply eBayes() for moderated statistics
+  efit <- eBayes(vfit)
+  
+  #0.05 adjusted p-value
+  #cutoff <- 5e-02
+  cutoff <- 0.05
+  #Multiple Test Correction method by default is BH (equivalent to FDR)
+  dt <- decideTests(efit, p.value = cutoff, lfc = 2)
+  dt <- as.data.frame(dt)
+  #table with all genes and their DGE stats
+  DEgenes <- topTable(efit, number = Inf)
+  
+  #calculating log-cpm
+  lcpm <- cpm(expr_mat, log=TRUE)
+  cleaned_log_cpm_df <- as.data.frame(v$E)
+  cleaned_log_cpm_df <- cleaned_log_cpm_df %>% rownames_to_column("gene")
+  
+  #for input
+  res <- list()
+  res[["DecisionTable"]] <- dt
+  res[["DEgenes"]] <- DEgenes
+  res[["LogCPM"]] <- lcpm
+  res[["cleanedLogCPM"]] <- cleaned_log_cpm_df
+  
+  return(res)
+}
+###############
+
+###############
+#function for gene set enrichment analysis (GSEA); TF - do for TFs or no?
+#terms is required - it's a gmt file with TF targets or Pathway terms
+enrichmentAnalysis <- function(DEgenes, TF = F, terms = NULL, minsize){
+  
+  gseaInputGeneScores <- DEgenes %>%
+    dplyr::select("logFC", "adj.P.Val", "P.Value", "gene", "t")
+  
+  gseaInputGeneScores$Sign <- sapply(gseaInputGeneScores$logFC, sign)
+  #you can do adjusted/ no big difference actually
+  gseaInputGeneScores$LogPvalue <- sapply(gseaInputGeneScores$P.Val, function(x){ -log10(x) })
+  gseaInputGeneScores$Score <- gseaInputGeneScores$Sign * gseaInputGeneScores$LogPvalue 
+  
+  #gseaInputGeneScores$Score <- gseaInputGeneScores$t #same actually as sorting above
+  
+  #gseaInputGeneScores$Score <- gseaInputGeneScores$logFC
+  
+  #create ranked list of genes
+  #gseaInputGeneScores <- DEgenes %>% 
+    #mutate(absolute_logFC = abs(logFC)) %>% 
+    #dplyr::select(gene, t) %>% 
+    #na.omit() %>% 
+    #as.data.frame()
+  
+  genes <- gseaInputGeneScores$gene
+  gseaInputGeneScores <- gseaInputGeneScores$Score
+  names(gseaInputGeneScores) <- genes
+  gseaInputGeneScores <- sort(gseaInputGeneScores, decreasing = T)
+  #write(genes, file="~/Desktop/genes.txt")
+  
+  #perform GSEA 
+  #fgseaRes <- fgsea(terms, gseaInputGeneScores, minSize=minsize, maxSize=300, nperm=10000)
+  fgseaRes <- fgsea(terms, gseaInputGeneScores, minSize=minsize, maxSize=300)
+  
+  #filter only statistically significant terms and look at direction (NES > 0 means enrichment at the top of ranked list)
+  sign_pos <- fgseaRes %>% filter(padj < 0.05 & NES > 0)
+  sign_neg <- fgseaRes %>% filter(padj < 0.05 & NES < 0)
+  
+  #sort by NES (normalized enrichment score)
+  sign_pos <- sign_pos %>% arrange(desc(NES))
+  sign_neg <- sign_neg %>% arrange(NES)
+  
+  #saving resulting data frames to list
+  res <- list()
+  res[["Genes"]] <- genes
+  res[["Enrichment"]] <- fgseaRes
+  res[["Scores"]] <- gseaInputGeneScores
+  res[["Sign_Pos"]] <- sign_pos
+  res[["Sign_Neg"]] <- sign_neg
+  return(res)
+}
+###############
+
+#######################################################
+#MAIN DGE FUNCTION
+#######################################################
+performDGEanalysis <- function(expr_mat, meta_data, group1, group2, termGO = NULL,
+                               termTF = NULL, termH = NULL){
+  #perform DGE analysis with limma
+  test <- limma_DGE_group_analysis(expr_mat, meta_data, group1, group2)
+  print("Done with limma analysis")
+  #get decision table
+  dt <- test[["DecisionTable"]]
+  #get data frame with gene expression stats
+  DEgenes <- test[["DEgenes"]]
+  #get log cpm matrix
+  log_cpm <- test[["LogCPM"]]
+  cleaned_log_cpm_df <- test[["cleanedLogCPM"]]
+  
+  #arrange genes by logFC
+  DEgenes <- DEgenes %>% rownames_to_column("gene") %>% arrange(desc(logFC))
+  
+  #df of significantly up regulated genes
+  cutoff <- 0.05
+  upRegulatedGenes <- DEgenes %>% filter(logFC > 2 & adj.P.Val < cutoff)
+  #df of significantly down regulated genes
+  downRegulatedGenes <- DEgenes %>% filter(logFC < -2 & adj.P.Val < cutoff)
+  
+  enrichedGoPathways <- enrichmentAnalysis(DEgenes, TF = F, terms = termGO, minsize = 15)
+  print("Done with Pathways enrichment")
+  sign_pos_pathways <- enrichedGoPathways[["Sign_Pos"]]
+  sign_neg_pathways <- enrichedGoPathways[["Sign_Neg"]]
+  GOfgsea <- enrichedGoPathways[["Enrichment"]]
+  
+  enrichedTFs <- enrichmentAnalysis(DEgenes, TF = T, terms = termTF, minsize = 5)
+  print("Done with TFs enrichment")
+  sign_pos_TF <- enrichedTFs[["Sign_Pos"]]
+  sign_neg_TF <- enrichedTFs[["Sign_Neg"]]
+  TFfgsea <- enrichedTFs[["Enrichment"]]
+  TFscores <- enrichedTFs[["Scores"]]
+  
+  enrichedHPathways <- enrichmentAnalysis(DEgenes, TF = F, terms = termH, minsize = 15)
+  print("Done with Hallmark Pathways enrichment")
+  sign_pos_pathwaysH <- enrichedHPathways[["Sign_Pos"]]
+  sign_neg_pathwaysH <- enrichedHPathways[["Sign_Neg"]]
+  Hfgsea <- enrichedHPathways[["Enrichment"]]
+  Hscores <- enrichedHPathways[["Scores"]]
+  
+  #genes for GOrilla analysis (or any other GO enrichment tool)
+  genes <- enrichedGoPathways[["Genes"]]
+  
+  #saving results
+  res <- list()
+  res[["DEgenesTable"]] <- DEgenes
+  res[["upRegulatedGenes"]] <- upRegulatedGenes
+  res[["downRegulatedGenes"]] <- downRegulatedGenes
+  res[["Sign_Pos_Pathway"]] <- sign_pos_pathways
+  res[["Sign_Neg_Pathway"]] <- sign_neg_pathways
+  res[["Sign_HALLMARK_Pos_Pathway"]] <- sign_pos_pathwaysH
+  res[["Sign_HALLMARK_Neg_Pathway"]] <- sign_neg_pathwaysH
+  res[["Sign_Pos_TF"]] <- sign_pos_TF
+  res[["Sign_Neg_TF"]] <- sign_neg_TF
+  res[["TF_enrichment"]] <- TFfgsea
+  res[["TF_scores"]] <- TFscores
+  res[["H_enrichment"]] <- Hfgsea
+  res[["GO_enrichment"]] <- GOfgsea
+  res[["H_scores"]] <- Hscores
+  res[["genes"]] <- genes
+  res[["DecisionTable"]] <- dt
+  res[["LogCPM"]] <- log_cpm
+  res[["cleanedLogCPM"]] <- cleaned_log_cpm_df
+  return(res)
+}
+```
+
+
+```{r}
+m_df_h <-  msigdbr(species = "Homo sapiens", category = "H")
+m_df_c2 <-  msigdbr(species = "Homo sapiens", category = "C2")
+m_df_c3 <-  msigdbr(species = "Homo sapiens", category = "C3")
+m_df_c5 <-  msigdbr(species = "Homo sapiens", category = "C5", subcategory = "BP")
+
+fgsea_sets_h <- m_df_h %>% split(x = .$gene_symbol, f = .$gs_name)
+fgsea_sets_c2 <- m_df_c2 %>% split(x = .$gene_symbol, f = .$gs_name)
+fgsea_sets_c3 <- m_df_c3 %>% split(x = .$gene_symbol, f = .$gs_name)
+fgsea_sets_c5 <- m_df_c5 %>% split(x = .$gene_symbol, f = .$gs_name)
+termTF <- gmtPathways("/home/german/Nick_Treg_project/RegNetworkStrong.gmt")
+```
+
+Actual analysis:
+```{r}
+ALL_expers = list(c("BRD_CHIR_6", "ESC", "6h"), 
+                  c("BRD_CHIR_6", "CHIR_6", "6h"),
+                  c("BRD_CHIR_6", "AC_6", "6h"),
+                  c("BRD_CHIR_6", "JNJ_CHIR_6", "6h"),
+                  #########
+                  c("BRD_CHIR_24", "ESC", "24h"), 
+                  c("BRD_CHIR_24", "CHIR_24", "24h"),
+                  c("BRD_CHIR_24", "AC_24", "24h"),
+                  c("BRD_CHIR_24", "JNJ_CHIR_24", "24h"),
+                  #########
+                  c("BRD_CHIR_72", "ESC", "72h"), 
+                  c("BRD_CHIR_72", "AC_72", "72h"),
+                  c("BRD_CHIR_72", "JNJ_CHIR_72", "72h"),
+                  #########
+                  c("BRD_CHIR_LOW_AC_72", "ESC", "72h"), 
+                  c("BRD_CHIR_LOW_AC_72", "AC_72", "72h"),
+                  c("BRD_CHIR_LOW_AC_72", "JNJ_CHIR_72", "72h"),
+                  #########
+                  c("BRD_NO_CHIR_6", "ESC", "6h"), 
+                  c("BRD_NO_CHIR_6", "CHIR_6", "6h"),
+                  c("BRD_NO_CHIR_6", "AC_6", "6h"),
+                  c("BRD_NO_CHIR_6", "JNJ_CHIR_6", "6h"),
+                  #########
+                  c("BRD_NO_CHIR_24", "ESC", "24h"), 
+                  c("BRD_NO_CHIR_24", "CHIR_24", "24h"),
+                  c("BRD_NO_CHIR_24", "AC_24", "24h"),
+                  c("BRD_NO_CHIR_24", "JNJ_CHIR_24", "24h"))
+
+for (i in ALL_expers){
+  groupA <- i[1]
+  groupB <- i[2] #control
+  time <- i[3]
+  
+  DGEres <- performDGEanalysis(y, metadata, groupA, groupB, termGO = fgsea_sets_c5, 
+                             termTF = termTF, 
+                             termH=fgsea_sets_h)
+  
+  Hgsea <- DGEres[["H_enrichment"]]
+
+  #table with all genes and their scores
+  DEgenes <- DGEres[["DEgenesTable"]]
+  
+  x <- DEgenes %>% filter((adj.P.Val < 0.05) & (logFC > 2 | logFC < -2))
+  nrow(x)
+  
+  Hgsea <- Hgsea[,-8]
+  
+  #for Sup table 7
+  write.table(DEgenes, file = paste(c('DE_BRD/',groupA,'_vs_',groupB,"_",time,'.csv'), collapse = ''), sep="\t",row.names=FALSE)
+  write.table(Hgsea, file = paste(c('DE_BRD/',groupA,'_vs_',groupB,"_",time, '_hgsea','.csv'), collapse = ''), sep="\t", row.names=FALSE)
+  print(paste0("Done with ",paste0(i,collapse = "_"),collapse="_"))
+}
+```

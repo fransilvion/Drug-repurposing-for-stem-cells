@@ -1,0 +1,273 @@
+---
+title: "GSE109658 analysis"
+author: "Gherman Novakovsky"
+date: "05/10/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#Loading the dataset
+
+if (file.exists("GSE109658.Rdata")) {
+    # if previously downloaded
+    load("GSE109658.Rdata")
+} else {
+    # Get geo object that contains our data and phenotype information
+    geo_obj <- getGEO("GSE109658", GSEMatrix = TRUE)
+    geo_obj <- geo_obj[[1]]
+    save(geo_obj, file = "GSE109658.Rdata")
+}
+
+#get covariate matrix
+geo_metadata <- pData(geo_obj)[, c("organism_ch1", "title", colnames(pData(geo_obj))[grep("characteristics", 
+    colnames(pData(geo_obj)))])]
+geo_metadata <- geo_metadata[,-3]
+colnames(geo_metadata) <- c("organism", "sample", "description")
+geo_metadata$age <- as.factor(rep(c("0", "1", "2", "3", "4"), 3))
+
+expr_data_counts <- read.table("GSE109658/GSE109658_gene_counts.txt", header=TRUE) 
+colnames(expr_data_counts)[-1] <- as.character(geo_metadata$sample)
+
+#we have duplicates in rownames
+repeats <- expr_data_counts$GENE[!isUnique(expr_data_counts$GENE)]
+
+expr_data_counts$GENE <- as.character(expr_data_counts$GENE)
+#get those genes that are not equal in terms of expression (fixing their names)
+#adding "-1" (or other index) to gene name
+for (i in repeats){
+ repeated_rows <- expr_data_counts %>% filter(GENE %in% i)
+ if (nrow(repeated_rows) == 1){
+   next
+ }
+ if (nrow(repeated_rows == 2)){
+   if (all(repeated_rows[1,] == repeated_rows[2,]) == FALSE) {
+     expr_data_counts$GENE[expr_data_counts$GENE == i][1] <- paste(i, "1", sep="-")
+   }
+ }
+ else{
+   for (j in 1:nrow(repeated_rows)-1){
+     if (all(repeated_rows[j,] == repeated_rows[j+1,]) == FALSE) {
+       expr_data_counts$GENE[expr_data_counts$GENE == i][1] <- paste(i, as.character(j), sep="-")
+   }
+   }
+ }
+}
+
+expr_data_counts <- expr_data_counts[!duplicated(expr_data_counts),]
+```
+
+```{r}
+#Data processing and visualization
+
+#first let's create a edgeR DGElist object
+rownams <- expr_data_counts$GENE
+expr_data_counts <- as.matrix(expr_data_counts)
+exp_data_counts_matrix <- apply(expr_data_counts[,-1], 2, function(x) as.numeric(x))
+rownames(exp_data_counts_matrix) <- rownams
+DGE_bulk_time_course_ec <- DGEList(counts = exp_data_counts_matrix) 
+cpm <- cpm(DGE_bulk_time_course_ec)
+lcpm <- cpm(DGE_bulk_time_course_ec, log=TRUE)
+keep.exprs <-rowSums(cpm > 0.5) >= 3 
+DGE_bulk_time_course_ec <- DGE_bulk_time_course_ec[keep.exprs,,]
+
+normalized_factors_expression <- calcNormFactors(DGE_bulk_time_course_ec, method = "TMM") #calculation of scaling factors (for library size)
+
+metadata_age <- geo_metadata[,c(2,4)]
+designMatrix <- model.matrix(~0 + age, metadata_age)
+
+after_voom_cpm <- voom(normalized_factors_expression, designMatrix, plot=FALSE)
+
+cleaned_log_cpm_df <- as.data.frame(after_voom_cpm$E)
+cleaned_log_cpm_df <- cleaned_log_cpm_df %>% rownames_to_column("gene")
+meltedLogedBultTimeCourseEc <- melt(cleaned_log_cpm_df, id='gene')
+
+plotMDS(cleaned_log_cpm_df[,-1], cex=1.0)
+```
+
+```{r}
+#Perform Differential expression analysis
+
+rownames(cleaned_log_cpm_df) <- cleaned_log_cpm_df$gene
+cleaned_log_cpm_df <- cleaned_log_cpm_df[,-1]
+# construct the contrast matrix
+contrastMatrix <- makeContrasts(
+  age1vage0 = age1 - age0,
+  age2vage1 = age2 - age1,
+  age3vage2 = age3 - age2,
+  age4vage3 = age4 - age3,
+  age2vage0 = age2 - age0,
+  age3vage0 = age3 - age0,
+  age4vage0 = age4 - age0,
+  levels = designMatrix
+)
+
+# keep the fit around as we will need to it for looking at other contrasts later 
+time_course_Fit <- lmFit(after_voom_cpm, designMatrix)
+# fit the contrast using the original fitted model
+contrastFit <- contrasts.fit(time_course_Fit, contrastMatrix)
+# apply eBayes() for moderated statistics
+efit <- eBayes(contrastFit)
+
+#table with all genes and their DGE stats
+DEgenes <- topTable(efit, number = Inf)
+DEgenes$genes <- rownames(DEgenes)
+```
+
+```{r}
+#Saving data for the future analysis;
+v4v0 <- topTable(efit, coef=7, number = Inf)
+v4v0$gene <- rownames(v4v0)
+
+saveRDS(v4v0, "v96v0_109658.rds")
+saveRDS(metadata_age, "metadata_109658.rds")
+```
+
+```{r}
+#Volcano plot
+
+#table with all genes and their DGE stats
+DEgenes <- topTable(efit, coef=7, number = Inf)
+DEgenes$gene <- rownames(DEgenes)
+
+markers <- c("EOMES", "GATA6", "SOX17", "GSC", "CER1", "HHEX", "SOX2", "POU5F1", "NANOG", "MYCN", 
+             "T", "CDX1", "FGF4", "MYC", "FOXA2", "CXCR4")
+
+highlight_df <- DEgenes %>% 
+             filter(gene %in% markers)
+
+image <- ggplot(data = DEgenes, aes(x = logFC, y = -log10(P.Value), color = ((-log10(adj.P.Val) > 3) & (logFC > 2 |   logFC < -2))))+
+  scale_colour_manual(name = 'BH p-value < 0.05', values = setNames(c('#1965B0','#D1BBD7'),c(T, F)), labels = c("False", "True"))+
+  geom_point()+
+  geom_vline(xintercept=0)+
+  geom_vline(xintercept=-2)+
+  geom_vline(xintercept=2)+
+  #geom_hline(yintercept=3)+
+  #geom_text(aes(label = ifelse((-log10(adj.P.Val) > 5) & (logFC > 7 | logFC < -7), gene, "")), vjust=-1, color="black", size = 3)+
+  geom_text(aes(label = ifelse(gene %in% markers, gene, "")), vjust=-1, color="black", size = 4)+
+  geom_point(data=highlight_df, 
+             aes(x = logFC, y = -log10(P.Value), color = ((-log10(adj.P.Val) > 3) & (logFC > 2 |   logFC < -2))), 
+             color='red',
+             size=3,
+             shape=16)+
+  ylab("-log10(p-value)")+
+  xlab("log2FC")+
+  labs(title="Gene expression differences in two groups, GSE109658")+
+  theme_bw()+
+  theme(axis.line = element_line(colour = "black"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        #panel.border = element_blank(),
+        panel.background = element_blank()) +
+  theme(axis.title.x=element_text(size=12),
+        axis.text.y=element_text(size=12),
+        axis.title.y=element_text(size=14),
+        axis.ticks.x=element_blank(),
+        strip.text.x = element_text(size=14),
+        strip.background = element_rect(colour="white", fill="white"),
+        legend.text=element_text(size=10),
+        legend.title=element_text(size=10))
+
+ggsave(file="VOLCANO_109658_2_NEW.svg", plot=image)
+```
+
+```{r}
+#GSVA analysis
+library(GSVA)
+
+m_df_h <-  msigdbr(species = "Homo sapiens", category = "H")
+m_df_c2 <-  msigdbr(species = "Homo sapiens", category = "C2")
+m_df_c3 <-  msigdbr(species = "Homo sapiens", category = "C3")
+
+fgsea_sets_h <- m_df_h %>% split(x = .$gene_symbol, f = .$gs_name)
+fgsea_sets_c2 <- m_df_c2 %>% split(x = .$gene_symbol, f = .$gs_name)
+fgsea_sets_c3 <- m_df_c3 %>% split(x = .$gene_symbol, f = .$gs_name)
+termTF <- gmtPathways("RegNetworkStrong.gmt")
+
+#lcpm, cleaned_log_cpm_df
+gsva_out <- gsva(as.matrix(lcpm), fgsea_sets_h, min.sz=5, max.sz=500,
+                 mx.diff=TRUE, verbose=FALSE, parallel.sz=1)
+gsva_out_TF <- gsva(lcpm, termTF, min.sz=5, max.sz=500,
+                 mx.diff=TRUE, verbose=FALSE, parallel.sz=1)
+
+gsva_out_TF <- as.data.frame(gsva_out_TF)
+TFs <- scan("human_TF.txt", character(), quote = "")
+gsva_out_TF <- gsva_out_TF[rownames(gsva_out_TF) %in% TFs,]
+
+# keep the fit around as we will need to it for looking at other contrasts later 
+time_course_Fit <- lmFit(gsva_out, designMatrix)
+# fit the contrast using the original fitted model
+contrastFit <- contrasts.fit(time_course_Fit, contrastMatrix)
+# apply eBayes() for moderated statistics
+efit <- eBayes(contrastFit)
+
+#table with all genes and their DGE stats
+top_pathways <- topTable(efit, number = Inf)
+
+write.table(top_pathways,"top_pathways_109658.csv",sep="\t",row.names=TRUE)
+
+time_course_Fit <- lmFit(gsva_out_TF, designMatrix)
+# fit the contrast using the original fitted model
+contrastFit <- contrasts.fit(time_course_Fit, contrastMatrix)
+# apply eBayes() for moderated statistics
+efit <- eBayes(contrastFit)
+
+#table with all genes and their DGE stats
+top_TFs <- topTable(efit, number = Inf)
+
+write.table(top_TFs,"top_TFs_109658.csv",sep="\t",row.names=TRUE)
+
+##################### HEATMAP
+
+gvsa_df <- as.data.frame(gsva_out)
+
+gvsa_df <- gvsa_df[,c("AB_1-0", "AB_2-0", "AB_4-0",
+                      "AB_1-1", "AB_2-1", "AB_4-1",
+                      "AB_1-2", "AB_2-2", "AB_4-2",
+                      "AB_1-3", "AB_2-3", "AB_4-3",
+                      "AB_1-4", "AB_2-4", "AB_4-4")]
+
+cols <- c(rep("#1965B0", 3), rep("#4EB265", 3), rep("#CAE0AB", 3), rep("#F7F056", 3),
+          rep("#DC050C", 3))
+names(cols) <- c(rep("0 hours", 3), rep("24 hours", 3), rep("48 hours", 3), 
+                 rep("72 hours", 3), rep("96 hours", 3))
+
+df <- data.frame(samples = c("0 hours", "0 hours", "0 hours",
+                             "24 hours", "24 hours", "24 hours",
+                             "48 hours", "48 hours", "48 hours",
+                             "72 hours", "72 hours", "72 hours",
+                              "96 hours", "96 hours", "96 hours"))
+
+for_heatmap <- t(scale(t(gvsa_df)))
+for_heatmap_TF <- t(scale(t(gsva_out_TF)))
+
+iridescent <- colour("iridescent")
+s <- ggheatmap(for_heatmap,
+               #for_heatmap_new,
+               main="Pathway activity",
+               col=colorRampPalette(iridescent(10))(256),
+               showticklabels = c(F, T),
+               dendrogram = "row",
+               #dendrogram = "none",
+               fontsize_row = 7,
+               ColSideColors = cols
+)
+
+y <- ggheatmap(for_heatmap_TF,
+               #for_heatmap_TF_new,
+               main="TF activity",
+               col=colorRampPalette(iridescent(10))(256),
+               showticklabels = c(F, T),
+               dendrogram = "row",
+               #dendrogram = "none",
+               fontsize_row = 5,
+               ColSideColors = cols
+)
+
+ggsave(file="heatmap_pathways_109658_clust.svg", plot=s)#, width=10, height=8)
+ggsave(file="heatmap_TFs_109658.svg_clust.svg", plot=y)#, width=10, height=8)
+```
+

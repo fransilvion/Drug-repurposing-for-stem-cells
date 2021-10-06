@@ -1,0 +1,125 @@
+---
+title: "cTRAP Analysis"
+author: "Gherman Novakovsky"
+date: "05/10/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r}
+
+library(cTRAP)
+
+cmapMetadata <- loadCMapData("cmapMetadata.txt", type="metadata")
+```
+
+```{r}
+# Filter CMap gene knockdown HepG2 data to be loaded
+cmapMetadataKD <- filterCMapMetadata(
+    cmapMetadata, 
+    perturbationType="Compound")
+
+#gpurtx: /mnt/md1/home/gnovakovsky/gnovakovskytmp/LINCS
+cmapPerturbationsCompounds <- prepareCMapPerturbations(
+    metadata=cmapMetadataKD, zscores="cmapZscores.gctx",
+    geneInfo="cmapGeneInfo.txt", compoundInfo="cmapCompoundInfo.txt")
+
+# Filter CMap gene knockdown HepG2 data to be loaded
+cmapMetadataKO <- filterCMapMetadata(
+    cmapMetadata, 
+    perturbationType="Consensus signature from shRNAs targeting the same gene")
+
+# Load filtered data (data will be downloaded if not found)
+cmapPerturbationsKO <- prepareCMapPerturbations(
+    metadata=cmapMetadataKO, zscores="cmapZscores.gctx",
+    geneInfo="cmapGeneInfo.txt")
+```
+
+```{r}
+#loading full gene expression profiles
+gene_expr <- readRDS("v96v0_75748.rds")
+expr_stat_75748 <- gene_expr$t
+names(expr_stat_75748) <- gene_expr$gene
+
+gene_expr <- readRDS("v96v0_109658.rds")
+expr_stat_109658 <- gene_expr$t
+names(expr_stat_109658) <- gene_expr$gene
+
+#loading 150/150 up/down-regulated genes
+up_genes <- scan("list_of_up_reg_genes_75748+109658_NEW_180221.txt", character(), quote = "")
+down_genes <- scan("list_of_dowm_reg_genes_75748+109658_NEW_180221.txt", character(), quote = "")
+
+
+#S/P correlations on 75748
+compareCompounds_75748 <- rankSimilarPerturbations(expr_stat_75748, 
+                                             cmapPerturbationsCompounds, method = c("spearman", "pearson"))
+#S/P correlations on 109658
+compareCompounds_109658 <- rankSimilarPerturbations(expr_stat_109658, 
+                                             cmapPerturbationsCompounds, method = c("spearman", "pearson"))
+
+#GSEA approach (part of ssCMAP/LINCS approach)
+for_gsea_75748 <- c(expr_stat_75748[up_genes], expr_stat_75748[down_genes])
+for_gsea_109658 <- c(expr_stat_109658[up_genes], expr_stat_109658[down_genes])
+
+#produce identical results (expected)
+compareCompounds_75748_gsea <- rankSimilarPerturbations(for_gsea_75748, 
+                                             cmapPerturbationsCompounds, method = c("gsea"))
+compareCompounds_109658_gsea <- rankSimilarPerturbations(for_gsea_109658, 
+                                             cmapPerturbationsCompounds, method = c("gsea"))
+```
+
+```{r}
+met <- cmapMetadataKD[,c("sig_id", "pert_iname")]
+colnames(met) <- c("compound_perturbation", "pert_iname")
+
+#corr
+x <- merge(compareCompounds_75748, met, by = "compound_perturbation")
+y <- merge(compareCompounds_109658, met, by = "compound_perturbation")
+
+#GSEA
+f <- merge(compareCompounds_109658_gsea, met, by = "compound_perturbation")
+
+best_gsea_compounds <-f %>% filter(GSEA >= 0.35)
+dim(best_gsea_compounds)
+best_gsea_compounds <- best_gsea_compounds[order(-best_gsea_compounds[,2]), ]
+#for plotting
+write.table(best_gsea_compounds, "best_gsea_compounds_GSEA_table.txt", 
+            sep = "\t")
+
+#for Supp table
+best_gsea_compounds <- best_gsea_compounds$pert_iname
+best_gsea_compounds <- unique(best_gsea_compounds)
+write(best_gsea_compounds, "../Shugo_RNA_seq_bulk_NEW/best_gsea_compounds_GSEA.txt")
+```
+
+```{r}
+#correlation results
+x_filtered_500 <- x %>% filter(spearman_coef > 0.1 & spearman_qvalue < 0.05) %>%
+  filter(pearson_coef > 0.1 & pearson_qvalue < 0.05) #%>% filter(rankProduct_rank <= 1000)
+
+y_filtered_500 <- y %>% filter(compound_perturbation %in% x_filtered_500$compound_perturbation)
+
+
+for_plotting_x <- data.frame(comp_id = x_filtered_500$compound_perturbation,
+                           sp_cor_x = x_filtered_500$spearman_coef,
+                           pe_cor_x = x_filtered_500$pearson_coef,
+                           comp_name_x = x_filtered_500$pert_iname)
+
+for_plotting_y <- data.frame(comp_id = y_filtered_500$compound_perturbation,
+                           sp_cor_y = y_filtered_500$spearman_coef,
+                           pe_cor_y = y_filtered_500$pearson_coef,
+                           comp_name_y = y_filtered_500$pert_iname)
+
+for_plotting <- merge(x = for_plotting_x, y = for_plotting_y, 
+                      by = "comp_id", all = TRUE)
+
+good1 <- for_plotting %>% filter(sp_cor_x > 0.15 & sp_cor_y > 0.15) #727
+good2 <- for_plotting %>% filter(pe_cor_x > 0.15 & pe_cor_y > 0.15) #584
+
+good <- unique(c(good1$comp_name_x,good2$comp_name_y)) #395
+
+write(good, "best_compounds_PSpCORRELATION.txt")
+```
+

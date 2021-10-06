@@ -1,0 +1,331 @@
+---
+title: "GSE75748 analysis"
+author: "Gherman Novakovsky"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r}
+suppressWarnings(suppressMessages(library(tidyverse)))
+suppressWarnings(suppressMessages(library(GEOquery)))
+suppressWarnings(suppressMessages(library(data.table)))
+suppressWarnings(suppressMessages(library(reshape2)))
+suppressWarnings(suppressMessages(library(dplyr)))
+suppressWarnings(suppressMessages(library(ggplot2)))
+suppressWarnings(suppressMessages(library(cowplot)))
+suppressWarnings(suppressMessages(library(limma)))
+suppressWarnings(suppressMessages(library(tibble)))
+suppressWarnings(suppressMessages(library(RColorBrewer)))
+suppressWarnings(suppressMessages(library(edgeR)))
+suppressWarnings(suppressMessages(library(readxl)))
+suppressWarnings(suppressMessages(library(pheatmap)))
+suppressMessages(suppressWarnings(library(hgu133a.db)))
+suppressMessages(suppressWarnings(library(annotate)))
+library(heatmaply)
+```
+
+```{r}
+#Loading the data
+
+if (file.exists("GSE75748.Rdata")) {
+    # if previously downloaded
+    load("GSE75748.Rdata")
+} else {
+    # Get geo object that contains our data and phenotype information
+    geo_obj <- getGEO("GSE75748", GSEMatrix = TRUE)
+    #geo_obj contains 1810 entries ((1018 + 758) single cells + (19 + 15) bulk RNA-seq)
+    geo_obj <- geo_obj[[1]]
+    save(geo_obj, file = "GSE75748.Rdata")
+}
+
+geo_metadata <- pData(geo_obj)
+```
+
+```{r}
+#Pseudo-bulk for 0 time point
+
+#cell type
+bulk_cell_type_ec <- read.csv("GSE75748/GSE75748_bulk_cell_type_ec.csv/GSE75748_bulk_cell_type_ec.csv", header=TRUE)
+#time course
+bulk_time_course_ec <- read.csv("GSE75748/GSE75748_bulk_time_course_ec.csv/GSE75748_bulk_time_course_ec.csv", header=TRUE)
+#single cell/cell type
+sc_cell_type <- read.csv("GSE75748/GSE75748_sc_time_course_ec.csv", header=TRUE)
+rownames(sc_cell_type) <- sc_cell_type$X
+sc_cell_type <- sc_cell_type[,-1]
+
+zero_cols <- colnames(sc_cell_type)
+zero_cols <- zero_cols[grepl("00h", zero_cols)]
+zero_expr <- sc_cell_type[,zero_cols]
+
+zero_metadata <- geo_metadata %>%
+  filter(grepl("for 0 hours", title))
+
+zero_first_replica <- apply(zero_expr[1:31], 1, mean) 
+zero_second_replica <- apply(zero_expr[32:62], 1, mean)
+zero_third_replica <- apply(zero_expr[63:92], 1, mean)
+
+zero_expr_replicas <- data.frame(H9_0h_rep1 = zero_first_replica, H9_0h_rep2 = zero_second_replica,
+                                 H9_0h_rep3 = zero_third_replica)
+rownames(bulk_time_course_ec) <- bulk_time_course_ec$X
+bulk_time_course_ec <- bulk_time_course_ec[,-1]
+
+#delete extra rows from zero expr data frame
+delete_rows <- setdiff(rownames(zero_expr_replicas), rownames(bulk_time_course_ec))
+zero_expr_replicas <- zero_expr_replicas[!rownames(zero_expr_replicas) %in% delete_rows,]
+bulk_time_course_ec <- merge(zero_expr_replicas, bulk_time_course_ec, by="row.names")
+rownames(bulk_time_course_ec) <- bulk_time_course_ec$Row.names
+bulk_time_course_ec <- bulk_time_course_ec[,-1]
+
+sample_names <- colnames(bulk_time_course_ec) #without gene name
+time_fact <- paste(c(0, 12,24,36,72,96), sep="", 'h') #factors of time
+time_fact <- rep(time_fact, each=3)
+time_int <- rep(c(0, 12,24,36,72,96), each=3) #time as continious variable
+metadata <- data.frame(samples = sample_names, time = time_fact, age = time_int)
+```
+
+```{r}
+#Data processing
+
+#first let's create a edgeR DGElist object
+bulk_time_course_ec <- as.matrix(bulk_time_course_ec)
+rows <- rownames(bulk_time_course_ec)
+#bulk_time_course_ec <- bulk_time_course_ec[,-1]
+bulk_time_course_ec <- apply(bulk_time_course_ec, 2, as.double)
+rownames(bulk_time_course_ec) <- rows
+
+DGE_bulk_time_course_ec <- DGEList(counts = bulk_time_course_ec) 
+cpm <- cpm(DGE_bulk_time_course_ec)
+lcpm <- cpm(DGE_bulk_time_course_ec, log=TRUE)
+keep.exprs <-rowSums(cpm > 1) >= 3
+DGE_bulk_time_course_ec <- DGE_bulk_time_course_ec[keep.exprs,,]
+
+normalized_factors_expression <- calcNormFactors(DGE_bulk_time_course_ec, method = "TMM") #calculation of scaling factors (for library size)
+
+data <- as.matrix(DGE_bulk_time_course_ec$counts)
+
+metadata_time <- metadata[,-3]
+metadata_time$samples <- as.character(metadata_time$samples)
+
+designMatrix <- model.matrix(~0 + time, metadata_time)
+
+after_voom_cpm <- voom(normalized_factors_expression, designMatrix, plot=FALSE)
+
+cleaned_log_cpm_df <- as.data.frame(after_voom_cpm$E)
+cleaned_log_cpm_df <- cleaned_log_cpm_df %>% rownames_to_column("gene")
+meltedLogedBultTimeCourseEc <- melt(cleaned_log_cpm_df, id='gene')
+```
+
+
+```{r}
+#Visualization
+
+nsamples <- ncol(cleaned_log_cpm_df[,-1])
+group <- metadata_time$time
+col <- brewer.pal(nsamples, "Paired")
+plotMDS(cleaned_log_cpm_df[,-1], cex=1.5, labels = group, col = col)
+```
+
+```{r}
+#PCA plot
+
+project.pca <- prcomp(t(lcpm), center = TRUE,scale. = TRUE)
+project.pca.proportionvariances <- ((project.pca$sdev^2) / (sum(project.pca$sdev^2)))*100
+
+plot(project.pca$x, type="n", main="Principal components analysis bi-plot", xlab=paste("PC1, ", round(project.pca.proportionvariances[1], 2), "%"), ylab=paste("PC2, ", round(project.pca.proportionvariances[2], 2), "%"))
+points(project.pca$x, col=col, pch=16, cex=1)
+text(project.pca$x, col="black", labels = group, pch=16, cex=1.25, pos = 3)
+```
+
+```{r}
+#Diff expression analysis
+
+rownames(cleaned_log_cpm_df) <- cleaned_log_cpm_df$gene
+cleaned_log_cpm_df <- cleaned_log_cpm_df[,-1]
+# construct the contrast matrix
+contrastMatrix <- makeContrasts(
+  v12v0 = time12h - time0h,
+  v24v12 = time24h - time12h,
+  v36v24 = time36h - time24h,
+  v72v36 = time72h - time36h,
+  v96v72 = time96h - time72h,
+  v24v0 = time24h - time0h,
+  v36v0 = time36h - time0h,
+  v72v0 = time72h - time0h,
+  v96v0 = time96h - time0h,
+  levels = designMatrix
+)
+
+# keep the fit around as we will need to it for looking at other contrasts later 
+time_course_Fit <- lmFit(after_voom_cpm, designMatrix)
+# fit the contrast using the original fitted model
+contrastFit <- contrasts.fit(time_course_Fit, contrastMatrix)
+# apply eBayes() for moderated statistics
+efit <- eBayes(contrastFit)
+
+#table with all genes and their DGE stats
+DEgenes <- topTable(efit, number = Inf)
+DEgenes$genes <- rownames(DEgenes)
+```
+
+```{r}
+#Saving the data for the future analysis
+v96v0 <- topTable(efit, coef=9, number = Inf)
+v96v0$gene <- rownames(v96v0)
+saveRDS(v96v0, "v96v0_75748.rds")
+saveRDS(metadata_time, "metadata_75748.rds")
+```
+
+```{r}
+#Volcano plot
+
+DEgenes <- topTable(efit, coef=9, number = Inf)
+DEgenes$gene <- rownames(DEgenes)
+
+markers <- c("EOMES", "GATA6", "SOX17", "GSC", "CER1", "HHEX", "SOX2", "POU5F1", "NANOG", "MYCN", 
+             "T", "CDX1", "FGF4", "MYC", "FOXA2", "CXCR4")
+
+highlight_df <- DEgenes %>% 
+             filter(gene %in% markers)
+
+image <- ggplot(data = DEgenes, aes(x = logFC, y = -log10(P.Value), color = ((-log10(adj.P.Val) > 3) & (logFC > 2 |   logFC < -2))))+
+  scale_colour_manual(name = 'BH p-value < 0.05', values = setNames(c('#1965B0','#D1BBD7'),c(T, F)), labels = c("False", "True"))+
+  geom_point()+
+  geom_vline(xintercept=0)+
+  geom_vline(xintercept=-2)+
+  geom_vline(xintercept=2)+
+  #geom_hline(yintercept=3)+
+  #geom_text(aes(label = ifelse((-log10(adj.P.Val) > 5) & (logFC > 7 | logFC < -7), gene, "")), vjust=-1, color="black", size = 3)+
+  geom_text(aes(label = ifelse(gene %in% markers, gene, "")), vjust=-1, color="black", size = 4)+
+  geom_point(data=highlight_df, 
+             aes(x = logFC, y = -log10(P.Value), color = ((-log10(adj.P.Val) > 3) & (logFC > 2 |   logFC < -2))), 
+             color='red',
+             size=3,
+             shape=16)+
+  ylab("-log10(p-value)")+
+  xlab("log2FC")+
+  labs(title="Gene expression differences in two groups, GSE75748")+
+  theme_bw()+
+  theme(axis.line = element_line(colour = "black"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        #panel.border = element_blank(),
+        panel.background = element_blank()) +
+  theme(axis.title.x=element_text(size=12),
+        axis.text.y=element_text(size=12),
+        axis.title.y=element_text(size=14),
+        axis.ticks.x=element_blank(),
+        strip.text.x = element_text(size=14),
+        strip.background = element_rect(colour="white", fill="white"),
+        legend.text=element_text(size=10),
+        legend.title=element_text(size=10))
+
+ggsave(file="VOLCANO_75748.svg", plot=image)
+```
+
+```{r}
+#GSVA analysis
+
+#GSVA
+library(GSVA)
+library(msigdbr)
+library(fgsea)
+library(khroma)
+
+m_df_h <-  msigdbr(species = "Homo sapiens", category = "H")
+m_df_c2 <-  msigdbr(species = "Homo sapiens", category = "C2")
+m_df_c3 <-  msigdbr(species = "Homo sapiens", category = "C3")
+
+fgsea_sets_h <- m_df_h %>% split(x = .$gene_symbol, f = .$gs_name)
+fgsea_sets_c2 <- m_df_c2 %>% split(x = .$gene_symbol, f = .$gs_name)
+fgsea_sets_c3 <- m_df_c3 %>% split(x = .$gene_symbol, f = .$gs_name)
+termTF <- gmtPathways("RegNetworkStrong.gmt")
+
+#lcpm, cleaned_log_cpm_df
+gsva_out <- gsva(lcpm, fgsea_sets_h, min.sz=5, max.sz=500,
+                 mx.diff=TRUE, verbose=FALSE, parallel.sz=1)
+
+gsva_out_TF <- gsva(lcpm, termTF, min.sz=5, max.sz=500,
+                 mx.diff=TRUE, verbose=FALSE, parallel.sz=1)
+gsva_out_TF <- as.data.frame(gsva_out_TF)
+TFs <- scan("human_TF.txt", character(), quote = "")
+gsva_out_TF <- gsva_out_TF[rownames(gsva_out_TF) %in% TFs,]
+
+rownames(gsva_out) <- sapply(rownames(gsva_out), function(x) {paste(unlist(str_split(x, "_"))[-1], collapse=" ")})
+
+# keep the fit around as we will need to it for looking at other contrasts later 
+time_course_Fit <- lmFit(gsva_out, designMatrix)
+# fit the contrast using the original fitted model
+contrastFit <- contrasts.fit(time_course_Fit, contrastMatrix)
+# apply eBayes() for moderated statistics
+efit <- eBayes(contrastFit)
+
+#table with all genes and their DGE stats
+top_pathways1 <- topTable(efit, number = Inf, coef="v72v0")
+top_pathways1$paths <- rownames(top_pathways1)
+top_pathways <- topTable(efit, number = Inf)
+
+write.table(top_pathways,"top_pathways_75748.csv",sep="\t",row.names=TRUE)
+
+############################################
+
+# keep the fit around as we will need to it for looking at other contrasts later 
+time_course_Fit <- lmFit(gsva_out_TF, designMatrix)
+# fit the contrast using the original fitted model
+contrastFit <- contrasts.fit(time_course_Fit, contrastMatrix)
+# apply eBayes() for moderated statistics
+efit <- eBayes(contrastFit)
+
+#table with all genes and their DGE stats
+top_pathways1 <- topTable(efit, number = Inf, coef="v12v0")
+top_pathways1$paths <- rownames(top_pathways1)
+top_TFs <- topTable(efit, number = Inf)
+
+write.table(top_TFs,"top_TFs_75748.csv",sep="\t",row.names=TRUE)
+
+##################### HEATMAP
+
+gvsa_df <- as.data.frame(gsva_out)
+
+
+cols <- c(rep("#1965B0", 3), rep("#7BAFDE", 3), rep("#4EB265", 3), rep("#CAE0AB", 3), rep("#F7F056", 3),
+          rep("#DC050C", 3))
+names(cols) <- c(rep("0 hours", 3), rep("12 hours", 3), rep("24 hours", 3),
+                 rep("36 hours", 3), rep("72 hours", 3), rep("96 hours", 3))
+
+df <- data.frame(samples = c("0 hours", "0 hours", "0 hours",
+                             "12 hours", "12 hours", "12 hours",
+                             "24 hours", "24 hours", "24 hours",
+                             "36 hours", "36 hours", "36 hours",
+                             "72 hours", "72 hours", "72 hours",
+                              "96 hours", "96 hours", "96 hours"))
+
+for_heatmap <- t(scale(t(gvsa_df)))
+for_heatmap_TF <- t(scale(t(gsva_out_TF)))
+
+iridescent <- colour("iridescent")
+s <- ggheatmap(
+               for_heatmap,
+               main="Pathway activity",
+               col=colorRampPalette(iridescent(10))(256),
+               showticklabels = c(F, T),
+               dendrogram = "row",
+               fontsize_row = 7,
+               ColSideColors = cols
+)
+
+y <- ggheatmap(
+               for_heatmap_TF,
+               main="TF activity",
+               col=colorRampPalette(iridescent(10))(256),
+               showticklabels = c(F, T),
+               dendrogram = "row",
+               fontsize_row = 5,
+               ColSideColors = cols
+)
+
+ggsave(file="fig1H_heatmap_pathways_75748.svg", plot=s)#, width=10, height=8)
+ggsave(file="fig1I_heatmap_TFs_75748.svg", plot=y)#, width=10, height=8)
+```
+

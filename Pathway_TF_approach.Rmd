@@ -1,0 +1,687 @@
+---
+title: "Pathway/TF approach"
+author: "Gherman Novakovsky"
+date: "06/10/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r}
+#libraries
+library(org.Hs.eg.db)
+library(dplyr)
+library(fgsea)
+library(tibble)
+library(msigdbr)
+library(stringr)
+```
+
+```{r}
+#loading LINCS metadata
+conditions <- readRDS("Version2-CPSubset/Interim/condition.metadata.RDS.XZ") #301027 18
+samples <- readRDS("Version2-CPSubset/Interim/sample.metadata.RDS.XZ")
+
+sort(table(conditions$cell_id), decreasing = T)
+```
+
+```{r}
+#loading pathway sets
+hs <- org.Hs.eg.db
+
+m_df_h <-  msigdbr(species = "Homo sapiens", category = "H")
+m_df_c2 <-  msigdbr(species = "Homo sapiens", category = "C2")
+m_df_c3 <-  msigdbr(species = "Homo sapiens", category = "C3")
+m_df_c5 <-  msigdbr(species = "Homo sapiens", category = "C5")
+
+termH <- m_df_h %>% split(x = .$gene_symbol, f = .$gs_name)
+termC2 <- m_df_c2 %>% split(x = .$gene_symbol, f = .$gs_name)
+termC5 <- m_df_c5 %>% split(x = .$gene_symbol, f = .$gs_name)
+termTF <- gmtPathways("RegNetworkStrong.gmt")
+termKegg <- gmtPathways("KeggPathways.gmt")
+```
+
+```{r}
+caseidsMCF7 <- conditions %>% filter(cell_id == "MCF7") #40403
+
+lincs_metadata_mcf7 <- caseidsMCF7 %>%
+  filter(trt_ctime == "24h") #28156
+
+length(unique(lincs_metadata_mcf7$trt_iname)) #11363
+
+#first let's split the dosage column (looks like it only has uM concentrations)
+test <- str_split_fixed(lincs_metadata_mcf7$trt_cdose, "u", 2)
+colnames(test) <- c("DOSE", "MOLE")
+test <- as.data.frame(test)
+test$case_ID <- lincs_metadata_mcf7$case_ID
+test$DOSE <- as.numeric(as.character(test$DOSE))
+#lincs_metadata_mcf7 <- lincs_metadata_mcf7[,-6]
+lincs_metadata_mcf7$dosage <- test$DOSE
+repeated_drugs <- unique(lincs_metadata_mcf7$trt_iname[which(duplicated(lincs_metadata_mcf7$trt_iname))])
+#function for removing repeats in the data frame (and live max dosage)
+remove_repeats <- function(df, rep_drugs){
+  new_copy_of_df <- cbind(df) #we created a copy
+  
+  for (drugRep in repeated_drugs){
+    test <- lincs_metadata_mcf7 %>% filter(trt_iname %in% drugRep)
+    delete_indeces <- test$case_ID[-which(test$dosage == max(test$dosage))]
+    new_copy_of_df <- new_copy_of_df %>%
+      filter(!case_ID %in% delete_indeces)
+  }
+  
+  return(new_copy_of_df)
+}
+
+lincs_metadata_mcf7 <- remove_repeats(lincs_metadata_mcf7, repeated_drugs) #14260
+length(unique(lincs_metadata_mcf7$trt_iname)) #11363
+caseidsMCF7 <- lincs_metadata_mcf7$case_ID
+```
+
+```{r}
+#loading FC (fold-change) data from Lim-Pavlidis 2021 study
+partable <- readRDS("FC_matrices/PartitionTable.RDS.XZ")
+
+fc1 <- readRDS(paste("FC_matrices/Part.", "1", ".fc.matrix.RDS.XZ", sep=""))
+fc1 <- fc1[, colnames(fc1) %in% caseidsMCF7]
+fc2 <- readRDS(paste("FC_matrices/Part.", "2", ".fc.matrix.RDS.XZ", sep=""))
+fc2 <- fc2[, colnames(fc2) %in% caseidsMCF7]
+fc3 <- readRDS(paste("FC_matrices/Part.", "3", ".fc.matrix.RDS.XZ", sep=""))
+fc3 <- fc3[, colnames(fc3) %in% caseidsMCF7]
+fc4 <- readRDS(paste("FC_matrices/Part.", "4", ".fc.matrix.RDS.XZ", sep=""))
+fc4 <- fc4[, colnames(fc4) %in% caseidsMCF7]
+fc5 <- readRDS(paste("FC_matrices/Part.", "5", ".fc.matrix.RDS.XZ", sep=""))
+fc5 <- fc5[, colnames(fc5) %in% caseidsMCF7]
+fc6 <- readRDS(paste("FC_matrices/Part.", "6", ".fc.matrix.RDS.XZ", sep=""))
+fc6 <- fc6[, colnames(fc6) %in% caseidsMCF7]
+fc7 <- readRDS(paste("FC_matrices/Part.", "7", ".fc.matrix.RDS.XZ", sep=""))
+fc7 <- fc7[, colnames(fc7) %in% caseidsMCF7]
+fc8 <- readRDS(paste("FC_matrices/Part.", "8", ".fc.matrix.RDS.XZ", sep=""))
+fc8 <- fc8[, colnames(fc8) %in% caseidsMCF7]
+fc9 <- readRDS(paste("FC_matrices/Part.", "9", ".fc.matrix.RDS.XZ", sep=""))
+fc9 <- fc9[, colnames(fc9) %in% caseidsMCF7]
+fc10 <- readRDS(paste("FC_matrices/Part.", "10", ".fc.matrix.RDS.XZ", sep=""))
+fc10 <- fc10[, colnames(fc10) %in% caseidsMCF7]
+fc11 <- readRDS(paste("FC_matrices/Part.", "11", ".fc.matrix.RDS.XZ", sep=""))
+fc11 <- fc11[, colnames(fc11) %in% caseidsMCF7]
+fc12 <- readRDS(paste("FC_matrices/Part.", "12", ".fc.matrix.RDS.XZ", sep=""))
+fc12 <- fc12[, colnames(fc12) %in% caseidsMCF7]
+fc13 <- readRDS(paste("FC_matrices/Part.", "13", ".fc.matrix.RDS.XZ", sep=""))
+fc13 <- fc13[, colnames(fc13) %in% caseidsMCF7]
+fc14 <- readRDS(paste("FC_matrices/Part.", "14", ".fc.matrix.RDS.XZ", sep=""))
+fc14 <- fc14[, colnames(fc14) %in% caseidsMCF7]
+fc15 <- readRDS(paste("FC_matrices/Part.", "15", ".fc.matrix.RDS.XZ", sep=""))
+fc15 <- fc15[, colnames(fc15) %in% caseidsMCF7]
+fc16 <- readRDS(paste("FC_matrices/Part.", "16", ".fc.matrix.RDS.XZ", sep=""))
+fc16 <- fc16[, colnames(fc16) %in% caseidsMCF7]
+fc17 <- readRDS(paste("FC_matrices/Part.", "17", ".fc.matrix.RDS.XZ", sep=""))
+fc17 <- fc17[, colnames(fc17) %in% caseidsMCF7]
+fc18 <- readRDS(paste("FC_matrices/Part.", "18", ".fc.matrix.RDS.XZ", sep=""))
+fc18 <- fc18[, colnames(fc18) %in% caseidsMCF7]
+fc19 <- readRDS(paste("FC_matrices/Part.", "19", ".fc.matrix.RDS.XZ", sep=""))
+fc19 <- fc19[, colnames(fc19) %in% caseidsMCF7]
+fc20 <- readRDS(paste("FC_matrices/Part.", "20", ".fc.matrix.RDS.XZ", sep=""))
+fc20 <- fc20[, colnames(fc20) %in% caseidsMCF7]
+fc21 <- readRDS(paste("FC_matrices/Part.", "21", ".fc.matrix.RDS.XZ", sep=""))
+fc21 <- fc21[, colnames(fc21) %in% caseidsMCF7]
+fc22 <- readRDS(paste("FC_matrices/Part.", "22", ".fc.matrix.RDS.XZ", sep=""))
+fc22 <- fc22[, colnames(fc22) %in% caseidsMCF7]
+fc23 <- readRDS(paste("FC_matrices/Part.", "23", ".fc.matrix.RDS.XZ", sep=""))
+fc23 <- fc23[, colnames(fc23) %in% caseidsMCF7]
+fc24 <- readRDS(paste("FC_matrices/Part.", "24", ".fc.matrix.RDS.XZ", sep=""))
+fc24 <- fc24[, colnames(fc24) %in% caseidsMCF7]
+fc25 <- readRDS(paste("FC_matrices/Part.", "25", ".fc.matrix.RDS.XZ", sep=""))
+fc25 <- fc25[, colnames(fc25) %in% caseidsMCF7]
+fc26 <- readRDS(paste("FC_matrices/Part.", "26", ".fc.matrix.RDS.XZ", sep=""))
+fc26 <- fc26[, colnames(fc26) %in% caseidsMCF7]
+fc27 <- readRDS(paste("FC_matrices/Part.", "27", ".fc.matrix.RDS.XZ", sep=""))
+fc27 <- fc27[, colnames(fc27) %in% caseidsMCF7]
+fc28 <- readRDS(paste("FC_matrices/Part.", "28", ".fc.matrix.RDS.XZ", sep=""))
+fc28 <- fc28[, colnames(fc28) %in% caseidsMCF7]
+fc29 <- readRDS(paste("FC_matrices/Part.", "29", ".fc.matrix.RDS.XZ", sep=""))
+fc29 <- fc29[, colnames(fc29) %in% caseidsMCF7]
+fc30 <- readRDS(paste("FC_matrices/Part.", "30", ".fc.matrix.RDS.XZ", sep=""))
+fc30 <- fc30[, colnames(fc30) %in% caseidsMCF7]
+
+fc <- cbind(fc1, fc2, fc3, fc4, fc5, fc6, fc7, fc8, fc9, fc10, fc11, fc12, fc13, fc14, fc15, fc16, fc17, fc18, fc19, fc20, fc21, fc22, fc23, fc24, fc25, fc26, fc27, fc28, fc29, fc30)
+fcMCF7 <- fc
+save(fcMCF7, file="fcMCF7.RData")
+load("fcMCF7.RData")
+```
+
+```{r}
+#gene conversion
+gene_info <- read.table("Gene_Info.txt", header=TRUE, sep="\t", quote = "")
+entrez_genes <- rownames(fcMCF7)
+#test2 - temporary df for conversion
+test2 <- data.frame(pr_gene_id = entrez_genes)
+test2 <- merge(test2, gene_info[,c(1,2)], sort=F)
+#conversion
+rownames(fcMCF7) <- test2$pr_gene_symbol 
+colnames(fcMCF7) <- lincs_metadata_mcf7$trt_iname
+```
+
+```{r}
+#function for GSEA
+running_fgsea <- function(expression_vector, pathwayAnn){
+  fgseaRes <- fgsea(pathwayAnn, expression_vector, minSize=15, maxSize=300, nperm=10000, nproc=0)
+  
+  pathways_names <- names(pathwayAnn)
+  
+  res <- sapply(pathways_names, is_significant, fgseaRes)
+  #return(fgseaRes)
+  return(res)
+}
+```
+
+```{r, warning=FALSE}
+#Enrichment of Hallmark pathways
+res1000 <- apply(fcMCF7[,c(1:1000)], 2, running_fgsea, termH)
+res1000 <- t(res1000)
+save(res1000, file = "res_enrich/res1000H.Rdata")
+
+res2000 <- apply(fcMCF7[,c(1001:2000)], 2, running_fgsea, termH)
+res2000 <- t(res2000)
+save(res2000, file = "res_enrich/res2000H.Rdata")
+
+res3000 <- apply(fcMCF7[,c(2001:3000)], 2, running_fgsea, termH)
+res3000 <- t(res3000)
+save(res3000, file = "res_enrich/res3000H.Rdata")
+
+res4000 <- apply(fcMCF7[,c(3001:4000)], 2, running_fgsea, termH)
+res4000 <- t(res4000)
+save(res4000, file = "res_enrich/res4000H.Rdata")
+
+res5000 <- apply(fcMCF7[,c(4001:5000)], 2, running_fgsea, termH)
+res5000 <- t(res5000)
+save(res5000, file = "res_enrich/res5000H.Rdata")
+
+res6000 <- apply(fcMCF7[,c(5001:6000)], 2, running_fgsea, termH)
+res6000 <- t(res6000)
+save(res6000, file = "res_enrich/res6000H.Rdata")
+
+res7000 <- apply(fcMCF7[,c(6001:7000)], 2, running_fgsea, termH)
+res7000 <- t(res7000)
+save(res7000, file = "res_enrich/res7000H.Rdata")
+
+res8000 <- apply(fcMCF7[,c(7001:8000)], 2, running_fgsea, termH)
+res8000 <- t(res8000)
+save(res8000, file = "res_enrich/res8000H.Rdata")
+
+res9000 <- apply(fcMCF7[,c(8001:9000)], 2, running_fgsea, termH)
+res9000 <- t(res9000)
+save(res9000, file = "res_enrich/res9000H.Rdata")
+
+res10000 <- apply(fcMCF7[,c(9001:10000)], 2, running_fgsea, termH)
+res10000 <- t(res10000)
+save(res10000, file = "res_enrich/res10000H.Rdata")
+
+res11000 <- apply(fcMCF7[,c(10001:11000)], 2, running_fgsea, termH)
+res11000 <- t(res11000)
+save(res11000, file = "res_enrich/res11000H.Rdata")
+
+res12000 <- apply(fcMCF7[,c(11001:12000)], 2, running_fgsea, termH)
+res12000 <- t(res12000)
+save(res12000, file = "res_enrich/res12000H.Rdata")
+
+res13000 <- apply(fcMCF7[,c(12001:13000)], 2, running_fgsea, termH)
+res13000 <- t(res13000)
+save(res13000, file = "res_enrich/res13000H.Rdata")
+
+res14000 <- apply(fcMCF7[,c(13001:14000)], 2, running_fgsea, termH)
+res14000 <- t(res14000)
+save(res14000, file = "res_enrich/res14000H.Rdata")
+
+res15000 <- apply(fcMCF7[,c(14001:14260)], 2, running_fgsea, termH)
+res15000 <- t(res15000)
+save(res15000, file = "res_enrich/res15000H.Rdata")
+```
+
+```{r, warning=FALSE}
+#Enrichment of KEGG pathways
+res1000 <- apply(fcMCF7[,c(1:1000)], 2, running_fgsea, termKegg)
+res1000 <- t(res1000)
+save(res1000, file = "res_enrich/res1000Kegg.Rdata")
+
+res2000 <- apply(fcMCF7[,c(1001:2000)], 2, running_fgsea, termKegg)
+res2000 <- t(res2000)
+save(res2000, file = "res_enrich/res2000Kegg.Rdata")
+
+res3000 <- apply(fcMCF7[,c(2001:3000)], 2, running_fgsea, termKegg)
+res3000 <- t(res3000)
+save(res3000, file = "res_enrich/res3000Kegg.Rdata")
+
+res4000 <- apply(fcMCF7[,c(3001:4000)], 2, running_fgsea, termKegg)
+res4000 <- t(res4000)
+save(res4000, file = "res_enrich/res4000Kegg.Rdata")
+
+res5000 <- apply(fcMCF7[,c(4001:5000)], 2, running_fgsea, termKegg)
+res5000 <- t(res5000)
+save(res5000, file = "res_enrich/res5000Kegg.Rdata")
+
+res6000 <- apply(fcMCF7[,c(5001:6000)], 2, running_fgsea, termKegg)
+res6000 <- t(res6000)
+save(res6000, file = "res_enrich/res6000Kegg.Rdata")
+
+res7000 <- apply(fcMCF7[,c(6001:7000)], 2, running_fgsea, termKegg)
+res7000 <- t(res7000)
+save(res7000, file = "res_enrich/res7000Kegg.Rdata")
+
+res8000 <- apply(fcMCF7[,c(7001:8000)], 2, running_fgsea, termKegg)
+res8000 <- t(res8000)
+save(res8000, file = "res_enrich/res8000Kegg.Rdata")
+
+res9000 <- apply(fcMCF7[,c(8001:9000)], 2, running_fgsea, termKegg)
+res9000 <- t(res9000)
+save(res9000, file = "res_enrich/res9000Kegg.Rdata")
+
+res10000 <- apply(fcMCF7[,c(9001:10000)], 2, running_fgsea, termKegg)
+res10000 <- t(res10000)
+save(res10000, file = "res_enrich/res10000Kegg.Rdata")
+
+res11000 <- apply(fcMCF7[,c(10001:11000)], 2, running_fgsea, termKegg)
+res11000 <- t(res11000)
+save(res11000, file = "res_enrich/res11000Kegg.Rdata")
+
+res12000 <- apply(fcMCF7[,c(11001:12000)], 2, running_fgsea, termKegg)
+res12000 <- t(res12000)
+save(res12000, file = "res_enrich/res12000Kegg.Rdata")
+
+res13000 <- apply(fcMCF7[,c(12001:13000)], 2, running_fgsea, termKegg)
+res13000 <- t(res13000)
+save(res13000, file = "res_enrich/res13000Kegg.Rdata")
+
+res14000 <- apply(fcMCF7[,c(13001:14000)], 2, running_fgsea, termKegg)
+res14000 <- t(res14000)
+save(res14000, file = "res_enrich/res14000Kegg.Rdata")
+
+res15000 <- apply(fcMCF7[,c(14001:14260)], 2, running_fgsea, termKegg)
+res15000 <- t(res15000)
+save(res15000, file = "res_enrich/res15000Kegg.Rdata")
+```
+
+```{r}
+#Enrichment of TF target sets
+res1000 <- apply(fcMCF7[,c(1:1000)], 2, running_fgsea, termTF)
+res1000 <- t(res1000)
+save(res1000, file = "res_enrich/res1000TF.Rdata")
+
+res2000 <- apply(fcMCF7[,c(1001:2000)], 2, running_fgsea, termTF)
+res2000 <- t(res2000)
+save(res2000, file = "res_enrich/res2000TF.Rdata")
+
+res3000 <- apply(fcMCF7[,c(2001:3000)], 2, running_fgsea, termTF)
+res3000 <- t(res3000)
+save(res3000, file = "res_enrich/res3000TF.Rdata")
+
+res4000 <- apply(fcMCF7[,c(3001:4000)], 2, running_fgsea, termTF)
+res4000 <- t(res4000)
+save(res4000, file = "res_enrich/res4000TF.Rdata")
+
+res5000 <- apply(fcMCF7[,c(4001:5000)], 2, running_fgsea, termTF)
+res5000 <- t(res5000)
+save(res5000, file = "res_enrich/res5000TF.Rdata")
+
+res6000 <- apply(fcMCF7[,c(5001:6000)], 2, running_fgsea, termTF)
+res6000 <- t(res6000)
+save(res6000, file = "res_enrich/res6000TF.Rdata")
+
+res7000 <- apply(fcMCF7[,c(6001:7000)], 2, running_fgsea, termTF)
+res7000 <- t(res7000)
+save(res7000, file = "res_enrich/res7000TF.Rdata")
+
+res8000 <- apply(fcMCF7[,c(7001:8000)], 2, running_fgsea, termTF)
+res8000 <- t(res8000)
+save(res8000, file = "res_enrich/res8000TF.Rdata")
+
+res9000 <- apply(fcMCF7[,c(8001:9000)], 2, running_fgsea, termTF)
+res9000 <- t(res9000)
+save(res9000, file = "res_enrich/res9000TF.Rdata")
+
+res10000 <- apply(fcMCF7[,c(9001:10000)], 2, running_fgsea, termTF)
+res10000 <- t(res10000)
+save(res10000, file = "res_enrich/res10000TF.Rdata")
+
+res11000 <- apply(fcMCF7[,c(10001:11000)], 2, running_fgsea, termTF)
+res11000 <- t(res11000)
+save(res11000, file = "res_enrich/res11000TF.Rdata")
+
+res12000 <- apply(fcMCF7[,c(11001:12000)], 2, running_fgsea, termTF)
+res12000 <- t(res12000)
+save(res12000, file = "res_enrich/res12000TF.Rdata")
+
+res13000 <- apply(fcMCF7[,c(12001:13000)], 2, running_fgsea, termTF)
+res13000 <- t(res13000)
+save(res13000, file = "res_enrich/res13000TF.Rdata")
+
+res14000 <- apply(fcMCF7[,c(13001:14000)], 2, running_fgsea, termTF)
+res14000 <- t(res14000)
+save(res14000, file = "res_enrich/res14000TF.Rdata")
+
+res15000 <- apply(fcMCF7[,c(14001:14260)], 2, running_fgsea, termTF)
+res15000 <- t(res15000)
+save(res15000, file = "res_enrich/res15000TF.Rdata")
+```
+
+
+```{r}
+#combine all results into single data frame
+load("res_enrich/res1000H.Rdata")
+all_drugs <- res1000
+rm(res1000)
+load("res_enrich/res2000H.Rdata")
+all_drugs <- rbind(all_drugs, res2000)
+rm(res2000)
+load("res_enrich/res3000H.Rdata")
+all_drugs <- rbind(all_drugs, res3000)
+rm(res3000)
+load("res_enrich/res4000H.Rdata")
+all_drugs <- rbind(all_drugs, res4000)
+rm(res4000)
+load("res_enrich/res5000H.Rdata")
+all_drugs <- rbind(all_drugs, res5000)
+rm(res5000)
+load("res_enrich/res6000H.Rdata")
+all_drugs <- rbind(all_drugs, res6000)
+rm(res6000)
+load("res_enrich/res7000H.Rdata")
+all_drugs <- rbind(all_drugs, res7000)
+rm(res7000)
+load("res_enrich/res8000H.Rdata")
+all_drugs <- rbind(all_drugs, res8000)
+rm(res8000)
+load("res_enrich/res9000H.Rdata")
+all_drugs <- rbind(all_drugs, res9000)
+rm(res9000)
+load("res_enrich/res10000H.Rdata")
+all_drugs <- rbind(all_drugs, res10000)
+rm(res10000)
+load("res_enrich/res11000H.Rdata")
+all_drugs <- rbind(all_drugs, res11000)
+rm(res11000)
+load("res_enrich/res12000H.Rdata")
+all_drugs <- rbind(all_drugs, res12000)
+rm(res12000)
+load("res_enrich/res13000H.Rdata")
+all_drugs <- rbind(all_drugs, res13000)
+rm(res13000)
+load("res_enrich/res14000H.Rdata")
+all_drugs <- rbind(all_drugs, res14000)
+rm(res14000)
+load("res_enrich/res15000H.Rdata")
+all_drugs <- rbind(all_drugs, res15000)
+rm(res15000)
+all_H <- all_drugs
+
+#goes to Sup table 6 
+write.table(all_H, file="all_H.csv", sep="\t")
+
+f <- all_H[,"HALLMARK_TGF_BETA_SIGNALING"]
+names(f) <- rownames(all_H)
+f <- f[f == -1]
+
+all_drugs[all_drugs == -1] <- 0
+sum_across_all <- apply(all_drugs, 2, sum)
+pathways <- names(sum_across_all)
+sum_across_all <- as.data.frame(sum_across_all)
+sum_across_all$Pathways <- pathways
+sum_across_all <- sum_across_all %>% filter(sum_across_all > 0)
+colnames(sum_across_all) <- c("Numbers", "Pathways")
+sum_across_all <- sum_across_all[,c(2,1)]
+sum_across_all <- sum_across_all[order(sum_across_all$Numbers, decreasing = TRUE),]
+
+library(ggplot2)
+library(forcats)
+
+sum_across_all %>%
+  head(25) %>%
+  ggplot(aes(x = fct_reorder(Pathways, Numbers), 
+             y = Numbers)) +
+  geom_col(fill = "red", colour = "black") +
+  labs(title = "Hallmark Pathway numbers", 
+       x = "", y = "Number of drugs") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  coord_flip() +
+  theme_light()
+```
+
+```{r}
+#combine all results into single data frame
+load("res_enrich/res1000Kegg.Rdata")
+all_drugs <- res1000
+rm(res1000)
+load("res_enrich/res2000Kegg.Rdata")
+all_drugs <- rbind(all_drugs, res2000)
+rm(res2000)
+load("res_enrich/res3000Kegg.Rdata")
+all_drugs <- rbind(all_drugs, res3000)
+rm(res3000)
+load("res_enrich/res4000Kegg.Rdata")
+all_drugs <- rbind(all_drugs, res4000)
+rm(res4000)
+load("res_enrich/res5000Kegg.Rdata")
+all_drugs <- rbind(all_drugs, res5000)
+rm(res5000)
+load("res_enrich/res6000Kegg.Rdata")
+all_drugs <- rbind(all_drugs, res6000)
+rm(res6000)
+load("res_enrich/res7000Kegg.Rdata")
+all_drugs <- rbind(all_drugs, res7000)
+rm(res7000)
+load("res_enrich/res8000Kegg.Rdata")
+all_drugs <- rbind(all_drugs, res8000)
+rm(res8000)
+load("res_enrich/res9000Kegg.Rdata")
+all_drugs <- rbind(all_drugs, res9000)
+rm(res9000)
+load("res_enrich/res10000Kegg.Rdata")
+all_drugs <- rbind(all_drugs, res10000)
+rm(res10000)
+load("res_enrich/res11000Kegg.Rdata")
+all_drugs <- rbind(all_drugs, res11000)
+rm(res11000)
+load("res_enrich/res12000Kegg.Rdata")
+all_drugs <- rbind(all_drugs, res12000)
+rm(res12000)
+load("res_enrich/res13000Kegg.Rdata")
+all_drugs <- rbind(all_drugs, res13000)
+rm(res13000)
+load("res_enrich/res14000Kegg.Rdata")
+all_drugs <- rbind(all_drugs, res14000)
+rm(res14000)
+load("res_enrich/res15000Kegg.Rdata")
+all_drugs <- rbind(all_drugs, res15000)
+rm(res15000)
+all_kegg <- all_drugs
+
+#goes to Sup table 6 
+write.table(all_kegg, file="all_Kegg.csv", sep="\t")
+
+all_drugs[all_drugs == -1] <- 0
+sum_across_all <- apply(all_drugs, 2, sum)
+pathways <- names(sum_across_all)
+sum_across_all <- as.data.frame(sum_across_all)
+sum_across_all$Pathways <- pathways
+sum_across_all <- sum_across_all %>% filter(sum_across_all > 0)
+colnames(sum_across_all) <- c("Numbers", "Pathways")
+sum_across_all <- sum_across_all[,c(2,1)]
+sum_across_all <- sum_across_all[order(sum_across_all$Numbers, decreasing = TRUE),]
+
+library(ggplot2)
+library(forcats)
+
+sum_across_all %>%
+  head(25) %>%
+  ggplot(aes(x = fct_reorder(Pathways, Numbers), 
+             y = Numbers)) +
+  geom_col(fill = "cyan", colour = "black") +
+  labs(title = "KEGG Pathways", 
+       x = "", y = "Number of drugs") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  coord_flip() +
+  theme_light()
+```
+
+```{r}
+#combine all results into single data frame
+load("res_enrich/res1000TF.Rdata")
+all_drugs <- res1000
+rm(res1000)
+load("res_enrich/res2000TF.Rdata")
+all_drugs <- rbind(all_drugs, res2000)
+rm(res2000)
+load("res_enrich/res3000TF.Rdata")
+all_drugs <- rbind(all_drugs, res3000)
+rm(res3000)
+load("res_enrich/res4000TF.Rdata")
+all_drugs <- rbind(all_drugs, res4000)
+rm(res4000)
+load("res_enrich/res5000TF.Rdata")
+all_drugs <- rbind(all_drugs, res5000)
+rm(res5000)
+load("res_enrich/res6000TF.Rdata")
+all_drugs <- rbind(all_drugs, res6000)
+rm(res6000)
+load("res_enrich/res7000TF.Rdata")
+all_drugs <- rbind(all_drugs, res7000)
+rm(res7000)
+load("res_enrich/res8000TF.Rdata")
+all_drugs <- rbind(all_drugs, res8000)
+rm(res8000)
+load("res_enrich/res9000TF.Rdata")
+all_drugs <- rbind(all_drugs, res9000)
+rm(res9000)
+load("res_enrich/res10000TF.Rdata")
+all_drugs <- rbind(all_drugs, res10000)
+rm(res10000)
+load("res_enrich/res11000TF.Rdata")
+all_drugs <- rbind(all_drugs, res11000)
+rm(res11000)
+load("res_enrich/res12000TF.Rdata")
+all_drugs <- rbind(all_drugs, res12000)
+rm(res12000)
+load("res_enrich/res13000TF.Rdata")
+all_drugs <- rbind(all_drugs, res13000)
+rm(res13000)
+load("res_enrich/res14000TF.Rdata")
+all_drugs <- rbind(all_drugs, res14000)
+rm(res14000)
+load("res_enrich/res15000TF.Rdata")
+all_drugs <- rbind(all_drugs, res15000)
+rm(res15000)
+all_tf <- all_drugs
+
+all_tf[all_tf == -1] <- 0
+tfs <- read.table("~/LINCS/dbTF.tsv", sep="\t", header = F)
+tfs <- tfs$V1
+tfs <- intersect(colnames(all_tf), tfs)
+all_tf <- all_tf[,tfs]
+
+#goes to Sup table 6 
+write.table(all_tf, file="all_TFs.csv", sep="\t")
+
+sum_across_all <- apply(all_tf, 2, sum)
+pathways <- names(sum_across_all)
+sum_across_all <- as.data.frame(sum_across_all)
+sum_across_all$Pathways <- pathways
+sum_across_all <- sum_across_all %>% filter(sum_across_all > 0)
+colnames(sum_across_all) <- c("Numbers", "Pathways")
+sum_across_all <- sum_across_all[,c(2,1)]
+sum_across_all <- sum_across_all[order(sum_across_all$Numbers, decreasing = TRUE),]
+
+library(ggplot2)
+library(forcats)
+
+sum_across_all %>%
+  head(25) %>%
+  ggplot(aes(x = fct_reorder(Pathways, Numbers), 
+             y = Numbers)) +
+  geom_col(fill = "blue", colour = "black") +
+  labs(title = "TFs", 
+       x = "", y = "Number of drugs") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  coord_flip() +
+  theme_light()
+```
+
+```{r}
+#Hallmark TGF-beta
+all_H_df <- matrix(ncol=ncol(all_H), nrow=nrow(all_H))
+
+ for(i in 1:ncol(all_H)){
+  all_H_df[,i] <- all_H[,i]
+ }
+
+all_H_df <- data.frame(all_H_df)
+colnames(all_H_df) <- colnames(all_H)
+all_H_df$drug_names <- rownames(all_H)
+
+all_H_tgf <- all_H_df[,c("HALLMARK_TGF_BETA_SIGNALING", "drug_names")]
+all_H_tgf <- all_H_tgf[all_H_tgf["HALLMARK_TGF_BETA_SIGNALING"]>0,]
+pos_tgf_H <- all_H_tgf$drug_names #806
+length(unique(pos_tgf_H)) #767
+
+#KEGG TGF-beta
+all_kegg_df <- matrix(ncol=ncol(all_kegg), nrow=nrow(all_kegg))
+
+for(i in 1:ncol(all_kegg)){
+  all_kegg_df[,i] <- all_kegg[,i]
+}
+
+all_kegg_df <- data.frame(all_kegg_df)
+colnames(all_kegg_df) <- colnames(all_kegg)
+all_kegg_df$drug_names <- rownames(all_kegg)
+
+all_kegg_tgf <- all_kegg_df[,c("KEGG_TGF_BETA_SIGNALING_PATHWAY", "drug_names")]
+all_kegg_tgf <- all_kegg_tgf[all_kegg_tgf["KEGG_TGF_BETA_SIGNALING_PATHWAY"]>0,]
+pos_tgf_kegg <- all_kegg_tgf$drug_names #676
+length(unique(pos_tgf_kegg)) #654
+
+pos_tgf <- c(pos_tgf_kegg, pos_tgf_H) #1482
+pos_tgf <- unique(pos_tgf) #1287
+length(unique(pos_tgf)) #1287
+
+#SMAD2/3/4 enrichment
+all_tf_df <- matrix(ncol=ncol(all_tf), nrow=nrow(all_tf))
+
+ for(i in 1:ncol(all_tf)){
+  all_tf_df[,i] <- all_tf[,i]
+ }
+
+all_tf_df <- data.frame(all_tf_df)
+colnames(all_tf_df) <- colnames(all_tf)
+all_tf_df$drug_names <- rownames(all_tf)
+
+all_tf_tgf <- all_tf_df[,c("SMAD2", "SMAD3", "SMAD4", "drug_names")]
+all_tf_smad2 <- all_tf_tgf[all_tf_tgf["SMAD2"]>0,]
+all_tf_smad3 <- all_tf_tgf[all_tf_tgf["SMAD3"]>0,]
+all_tf_smad4 <- all_tf_tgf[all_tf_tgf["SMAD4"]>0,]
+pos_smad2 <- all_tf_smad2$drug_names #38
+pos_smad3 <- all_tf_smad3$drug_names #798
+pos_smad4 <- all_tf_smad4$drug_names #761
+
+pos_smad <- c(pos_smad2,pos_smad3, pos_smad4)
+pos_smad <- unique(pos_smad) #1062
+length(unique(pos_smad)) #1062
+
+#Right way of checking for the overlap
+all_H_tgf <- all_H_df[,c("HALLMARK_TGF_BETA_SIGNALING", "drug_names")]
+all_kegg_tgf <- all_kegg_df[,c("KEGG_TGF_BETA_SIGNALING_PATHWAY", "drug_names")]
+all_tf_tgf <- all_tf_df[,c("SMAD2", "SMAD3", "SMAD4", "drug_names")]
+
+cordf <- cbind(all_H_tgf[,"HALLMARK_TGF_BETA_SIGNALING"],
+               all_kegg_tgf[,"KEGG_TGF_BETA_SIGNALING_PATHWAY"],
+               all_tf_tgf)
+
+colnames(cordf) <- c("HALLMARK_TGF_BETA_SIGNALING", "KEGG_TGF_BETA_SIGNALING_PATHWAY",
+                     "SMAD2", "SMAD3", "SMAD4", "drug_names")
+cordf <- cordf %>% filter(HALLMARK_TGF_BETA_SIGNALING > 0 | KEGG_TGF_BETA_SIGNALING_PATHWAY > 0)
+cordf <- cordf %>% filter(SMAD2 > 0 | SMAD3 > 0 | SMAD4 > 0)
+dim(cordf) #429
+length(unique(cordf$drug_names)) #408
+
+#CORRECT
+#for Sup table 5
+write.table(cordf, file="BEST_MCF7_compounds.csv", sep="\t")
+```
+
